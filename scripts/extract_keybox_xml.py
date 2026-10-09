@@ -7,10 +7,35 @@ from pathlib import Path
 from typing import Optional
 
 
-def extract_keybox_xml(data: bytes) -> str:
-    blocks = re.findall(rb"<AndroidAttestation>.*?</AndroidAttestation>", data, re.DOTALL)
+import mmap
+
+def extract_keybox_xml_from_path(path: Path) -> str:
+    size = path.stat().st_size
+    if size == 0:
+        raise ValueError("File is empty")
+
+    blocks = []
+    with path.open("rb") as f:
+        try:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            idx = 0
+            while True:
+                start_idx = mm.find(b"<AndroidAttestation>", idx)
+                if start_idx == -1:
+                    break
+                end_idx = mm.find(b"</AndroidAttestation>", start_idx)
+                if end_idx == -1:
+                    break
+                end_idx += len(b"</AndroidAttestation>")
+                blocks.append(mm[start_idx:end_idx])
+                idx = end_idx
+            mm.close()
+        except ValueError:
+            pass
+
     if not blocks:
         raise ValueError("No <AndroidAttestation> block found")
+
     block = max(blocks, key=len)
     text = block.decode("utf-8", errors="replace").strip()
     if not text.startswith("<?xml"):
@@ -19,10 +44,32 @@ def extract_keybox_xml(data: bytes) -> str:
 
 
 def score_dump(path: Path) -> tuple[int, int, int]:
-    data = path.read_bytes()
-    att = len(re.findall(rb"<AndroidAttestation>", data))
-    pem = data.count(b"BEGIN EC PRIVATE KEY") + data.count(b"BEGIN RSA PRIVATE KEY")
-    kb = len(re.findall(rb"<Keybox", data))
+    size = path.stat().st_size
+    if size == 0:
+        return (0, 0, 0)
+    att = 0
+    pem = 0
+    kb = 0
+    with path.open("rb") as f:
+        try:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            def count_pattern(mm, pattern):
+                count = 0
+                idx = 0
+                while True:
+                    idx = mm.find(pattern, idx)
+                    if idx == -1:
+                        break
+                    count += 1
+                    idx += len(pattern)
+                return count
+
+            att = count_pattern(mm, b"<AndroidAttestation>")
+            pem = count_pattern(mm, b"BEGIN EC PRIVATE KEY") + count_pattern(mm, b"BEGIN RSA PRIVATE KEY")
+            kb = count_pattern(mm, b"<Keybox")
+            mm.close()
+        except ValueError:
+            pass
     return (att, pem, kb)
 
 
@@ -67,7 +114,7 @@ def main() -> int:
         return 1
 
     try:
-        xml = extract_keybox_xml(src.read_bytes())
+        xml = extract_keybox_xml_from_path(src)
     except ValueError as exc:
         print(f"ERROR: {exc} in {src.name}")
         print("Try another partition: python extract_keybox_xml.py -i dumps/protect1.bin")
