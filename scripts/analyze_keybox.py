@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 
+import mmap
+
 def analyze(path: Path) -> dict:
     result = {
         "path": path,
@@ -18,15 +20,56 @@ def analyze(path: Path) -> dict:
     }
     if not path.exists():
         return result
-    d = path.read_bytes()
-    result["att"] = len(re.findall(rb"<AndroidAttestation>", d))
-    result["kb"] = len(re.findall(rb"<Keybox", d))
-    result["pem_priv"] = d.count(b"BEGIN EC PRIVATE KEY") + d.count(b"BEGIN RSA PRIVATE KEY")
-    result["pem_cert"] = d.count(b"BEGIN CERTIFICATE")
-    result["wv"] = len(re.findall(rb"widevine", d, re.I))
-    m = re.search(rb'DeviceID="([^"]+)"', d)
-    if m:
-        result["device_id"] = m.group(1).decode()
+
+    size = path.stat().st_size
+    if size == 0:
+        return result
+
+    def count_pattern(mm, pattern, ignore_case=False):
+        count = 0
+        idx = 0
+        while True:
+            if ignore_case:
+                # mmap doesn't have an ignore case find, so we do it carefully or use regex on chunks
+                # But for 'widevine', we can just search for 'widevine' and 'Widevine'
+                idx1 = mm.find(pattern.lower(), idx)
+                idx2 = mm.find(pattern.capitalize(), idx)
+                if idx1 == -1 and idx2 == -1:
+                    break
+                elif idx1 == -1:
+                    idx = idx2 + len(pattern)
+                elif idx2 == -1:
+                    idx = idx1 + len(pattern)
+                else:
+                    idx = min(idx1, idx2) + len(pattern)
+                count += 1
+            else:
+                idx = mm.find(pattern, idx)
+                if idx == -1:
+                    break
+                count += 1
+                idx += len(pattern)
+        return count
+
+    with path.open("rb") as f:
+        try:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            result["att"] = count_pattern(mm, b"<AndroidAttestation>")
+            result["kb"] = count_pattern(mm, b"<Keybox")
+            result["pem_priv"] = count_pattern(mm, b"BEGIN EC PRIVATE KEY") + count_pattern(mm, b"BEGIN RSA PRIVATE KEY")
+            result["pem_cert"] = count_pattern(mm, b"BEGIN CERTIFICATE")
+            result["wv"] = count_pattern(mm, b"widevine", ignore_case=True)
+
+            # Find device_id using regex over a chunk if possible, or just scan
+            idx = mm.find(b'DeviceID="')
+            if idx != -1:
+                end = mm.find(b'"', idx + 10)
+                if end != -1:
+                    result["device_id"] = mm[idx+10:end].decode("utf-8", errors="ignore")
+            mm.close()
+        except ValueError:
+            pass
+
     if result["att"] > 0 and result["pem_priv"] > 0:
         result["format"] = "plaintext XML + PEM in partition"
     elif result["kb"] > 0 or result["wv"] > 0:

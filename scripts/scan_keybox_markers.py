@@ -17,16 +17,30 @@ PATTERNS = [
 ]
 
 
+import mmap
+
 def scan_file(path: Path) -> list[tuple[int, bytes]]:
-    data = path.read_bytes()
+    size = path.stat().st_size
+    if size == 0:
+        return []
     hits = []
-    text = data.decode("latin1", errors="ignore")
-    for pat in PATTERNS:
-        needle = pat.decode("latin1")
-        for m in re.finditer(re.escape(needle), text):
-            start = max(0, m.start() - 200)
-            end = min(len(data), m.end() + 2000)
-            hits.append((m.start(), data[start:end]))
+    with path.open("rb") as f:
+        try:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            for pat in PATTERNS:
+                idx = 0
+                while True:
+                    idx = mm.find(pat, idx)
+                    if idx == -1:
+                        break
+                    start = max(0, idx - 200)
+                    end = min(size, idx + 2000)
+                    hits.append((idx, mm[start:end]))
+                    idx += len(pat)
+            mm.close()
+        except ValueError:
+            pass
+    hits.sort(key=lambda x: x[0])
     return hits
 
 
